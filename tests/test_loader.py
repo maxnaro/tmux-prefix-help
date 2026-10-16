@@ -9,20 +9,34 @@ import subprocess
 import tempfile
 import unittest
 
+from support import BINARY, ROOT, require_binary
 
-LOADER = Path(__file__).resolve().parents[1] / "prefix-help.tmux"
+LOADER = ROOT / "prefix-help.tmux"
 
 
 class LoaderTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        require_binary()
+
     def test_load_is_idempotent_and_preserves_user_settings(self):
-        for delay in (None, "750"):
-            with self.subTest(delay=delay), tempfile.TemporaryDirectory() as directory:
+        for delay, legacy in ((None, False), ("750", False), ("750", True)):
+            with self.subTest(delay=delay, legacy=legacy), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 plugin = root / "plugin's folder"
                 plugin.mkdir()
                 shutil.copy2(LOADER, plugin / LOADER.name)
+                binary = plugin / "target/release/tmux-prefix-help"
+                binary.parent.mkdir(parents=True)
+                shutil.copy2(BINARY, binary)
                 state_file = root / "state.json"
                 initial = {"status-right": "existing status"}
+                if legacy:
+                    helper = str(plugin / "scripts/prefix-help.sh").replace("'", "'\\''")
+                    initial["status-right"] += (
+                        "#{?client_prefix,#(bash '" + helper + "' #{q:socket_path} "
+                        "#{q:session_id} #{pid} #{q:client_name}),}"
+                    )
                 if delay is not None:
                     initial["@prefix-help-delay"] = delay
                 state_file.write_text(json.dumps(initial))
@@ -50,7 +64,16 @@ class LoaderTests(unittest.TestCase):
                 self.assertTrue(state["status-right"].startswith("existing status"))
                 self.assertEqual(state["status-right"].count("#{?client_prefix,"), 1)
                 command = state["status-right"].split("#(", 1)[1].rsplit("),}", 1)[0]
-                self.assertEqual(shlex.split(command)[1], str(plugin / "scripts/prefix-help.sh"))
+                self.assertEqual(shlex.split(command)[:2], [str(binary), "watch"])
+                self.assertNotIn("scripts/prefix-help.sh", state["status-right"])
+
+    def test_missing_binary_explains_build_step(self):
+        with tempfile.TemporaryDirectory() as directory:
+            loader = Path(directory) / LOADER.name
+            shutil.copy2(LOADER, loader)
+            result = subprocess.run(["bash", str(loader)], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("cargo build --release --locked", result.stderr)
 
 
 if __name__ == "__main__":

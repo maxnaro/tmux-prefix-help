@@ -1,81 +1,25 @@
 """Keyboard decoding and real PTY checks, without needing a running tmux server."""
 
-import importlib.util
 import json
 import os
 from pathlib import Path
 import pty
-import re
 import select
 import subprocess
 import tempfile
 import time
+import termios
 import unittest
 
-
-POPUP = Path(__file__).resolve().parents[1] / "scripts/prefix-help-popup.py"
-SPEC = importlib.util.spec_from_file_location("prefix_popup", POPUP)
-popup = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(popup)
-
-
-class DecodeTests(unittest.TestCase):
-    def test_keyboard_encodings(self):
-        cases = {
-            b"1": "1", b";": ";", b"\x00": "C-@", b"\x02": "C-b",
-            b"\x03": "C-c", b"\x09": "Tab", b"\x0d": "Enter", b"\x7f": "BSpace",
-            "é".encode(): "é", "😺".encode(): "😺",
-            b"\x1bh": "M-h", b"\x1b\x02": "M-C-b", b"\x1b;": "M-;",
-            b"\x1b[A": "Up", b"\x1bOD": "Left", b"\x1b[1;5D": "C-Left",
-            b"\x1b[1;3C": "M-Right", b"\x1b[1;2A": "S-Up",
-            b"\x1b[3~": "Delete", b"\x1b[6~": "NPage", b"\x1b[Z": "BTab",
-            b"\x1bOP": "F1", b"\x1b[24~": "F12", b"\x1b[15;5~": "C-F5",
-            b"\x1bOp": "KP0", b"\x1bOM": "KPEnter",
-            b"\x1b[65;6u": "C-S-A", b"\x1b[27;3;59~": "M-;",
-        }
-        for raw, key in cases.items():
-            with self.subTest(raw=raw):
-                self.assertEqual(popup.decode_key(raw + b"extra"), (key, len(raw)))
-
-    def test_incomplete_keys_wait(self):
-        for raw in (b"", b"\x1b", b"\x1b[", b"\x1b[1;", b"\x1bO", b"\xc3"):
-            with self.subTest(raw=raw), self.assertRaises(popup.IncompleteKey):
-                popup.decode_key(raw)
-
-    def test_unknown_sequences_are_not_replayed_as_shortcuts(self):
-        for raw in (b"\x1b[200~pasted text", b"\x1b[999~", b"\xff"):
-            with self.subTest(raw=raw), self.assertRaises(popup.UnsupportedKey):
-                popup.decode_key(raw)
-
-    def test_close_precedes_replay_and_semicolons_are_escaped(self):
-        command = popup.replay_command("/socket", "/dev/pts/1", [";", "M-;"])
-        self.assertLess(command.index("display-popup"), command.index("send-keys"))
-        self.assertEqual(command[-2:], ["\\;", "M-\\;"])
-
-
-class LayoutTests(unittest.TestCase):
-    def test_full_layout_has_all_groups_and_keys(self):
-        lines = popup.hint_lines(68, 14)
-        plain = [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in lines]
-        text = "\n".join(plain)
-        for label in ("WINDOWS", "PANES", "COPY & SESSIONS", "TOOLS",
-                      "1-9", "arrows", "All keybindings", "Esc to dismiss"):
-            self.assertIn(label, text)
-        self.assertIn("\x1b[1m", "".join(lines))
-
-    def test_small_layouts_fit_and_keep_dismiss_hint(self):
-        for width, height in ((90, 14), (64, 8), (40, 14), (25, 4)):
-            with self.subTest(size=(width, height)):
-                lines = popup.hint_lines(width, height)
-                self.assertEqual(len(lines), height)
-                for line in lines:
-                    plain = re.sub(r"\x1b\[[0-9;]*m", "", line)
-                    self.assertLessEqual(len(plain), width - 1)
-                self.assertIn("dismiss", lines[-1])
+from support import BINARY, require_binary
 
 
 class PopupPTYTests(unittest.TestCase):
-    def run_popup(self, chunks, session="$1"):
+    @classmethod
+    def setUpClass(cls):
+        require_binary()
+
+    def run_popup(self, chunks, session="$1", queued=b""):
         with tempfile.TemporaryDirectory(prefix="prefix-popup-test-") as directory:
             root = Path(directory)
             log = root / "calls.jsonl"
@@ -91,11 +35,14 @@ class PopupPTYTests(unittest.TestCase):
             env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"],
                        MOCK_LOG=str(log), MOCK_SESSION=session, PYTHONDONTWRITEBYTECODE="1")
             master, slave = pty.openpty()
+            termios.tcsetwinsize(slave, (14, 68))
+            previous = termios.tcgetattr(slave)
+            if queued:
+                os.write(master, queued)
             process = subprocess.Popen(
-                ["python3", str(POPUP), "/socket", "/dev/pts/1", "$1"],
+                [str(BINARY), "popup", "/socket", "/dev/pts/1", "$1"],
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE, env=env,
             )
-            os.close(slave)
             try:
                 rendered = b""
                 deadline = time.monotonic() + 3
@@ -113,11 +60,17 @@ class PopupPTYTests(unittest.TestCase):
                         time.sleep(.01)
                 _, stderr = process.communicate(timeout=3)
                 self.assertEqual(process.returncode, 0, stderr)
+                self.assertEqual(termios.tcgetattr(slave), previous)
+                while select.select([master], [], [], 0)[0]:
+                    rendered += os.read(master, 4096)
+                for reset in (b"\x1b[?2004l", b"\x1b[>4;0m", b"\x1b[?25h"):
+                    self.assertIn(reset, rendered)
             finally:
                 if process.poll() is None:
                     process.kill()
                     process.communicate()
                 os.close(master)
+                os.close(slave)
             return [json.loads(line) for line in log.read_text().splitlines()]
 
     def test_unlisted_shortcut_and_queued_typing(self):
@@ -173,6 +126,36 @@ class PopupPTYTests(unittest.TestCase):
     def test_session_change_does_not_replay_input(self):
         calls = self.run_popup([b"x"], session="$2")
         self.assertEqual(len(calls), 1)
+
+    def test_startup_preserves_queued_input(self):
+        command = self.run_popup([], queued=b"1")[-1]["args"]
+        self.assertEqual(command[-1], "1")
+
+    def test_escape_then_queued_typing_goes_to_root(self):
+        command = self.run_popup([b"\x1b[27uhello"])[-1]["args"]
+        self.assertIn("root", command)
+        self.assertEqual(command[-5:], list("hello"))
+
+    def test_semicolons_are_escaped_for_tmux(self):
+        command = self.run_popup([b";\x1b;"])[-1]["args"]
+        self.assertEqual(command[-2:], ["\\;", "M-\\;"])
+
+    def test_invalid_suffix_discards_the_entire_burst(self):
+        command = self.run_popup([b"x\x1b[999~"])[-1]["args"]
+        self.assertNotIn("send-keys", command)
+        self.assertIn("root", command)
+
+    def test_truncated_input_is_rejected(self):
+        for raw in (b"\xc3", b"\x1b[1;", b"\xf0\x9f"):
+            with self.subTest(raw=raw):
+                command = self.run_popup([raw])[-1]["args"]
+                self.assertNotIn("send-keys", command)
+                self.assertIn("display-message", command)
+
+    def test_sequence_limit_discards_burst(self):
+        command = self.run_popup([b"\x1b[" + b"1" * 4097])[-1]["args"]
+        self.assertNotIn("send-keys", command)
+        self.assertIn("display-message", command)
 
 
 if __name__ == "__main__":
