@@ -1,0 +1,18 @@
+[package]
+name = "tmux-prefix-help"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Delayed floating shortcut hints for tmux"
+publish = false
+
+[dependencies]
+nix = { version = "0.31.3", default-features = false, features = ["term", "poll", "process"] }
+terminal_size = "0.4.4"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+strip = true
