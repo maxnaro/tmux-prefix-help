@@ -36,7 +36,7 @@ const GROUPS: [Group; 4] = [
     Group {
         title: "TOOLS",
         items: &[
-            ("r", "Reload config"),
+            ("r", "Refresh client"),
             (":", "Command prompt"),
             ("?", "All keybindings"),
             ("Esc", "Dismiss help"),
