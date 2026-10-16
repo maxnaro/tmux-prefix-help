@@ -134,7 +134,7 @@ pub fn run(socket: &OsStr, session: &OsStr, pid: &OsStr, client: &OsStr) -> io::
                 "-b",
                 "rounded",
                 "-s",
-                "bg=#1e222a,fg=#e5e9f0",
+                "bg=default,fg=#e5e9f0",
                 "-S",
                 "fg=#88c0d0",
             ])
