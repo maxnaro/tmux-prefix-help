@@ -1,3 +1,9 @@
+static SOCKET: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
+
+pub fn set_socket(socket: &std::ffi::OsStr) {
+    let _ = SOCKET.set(socket.to_os_string());
+}
+
 struct Group {
     title: &'static str,
     items: &'static [(&'static str, &'static str)],
@@ -31,15 +37,17 @@ const GROUPS: [Group; 4] = [
             ("]", "Paste buffer"),
             ("s", "Choose session"),
             ("d", "Detach"),
+            ("g", "Project workspace"),
         ],
     },
     Group {
         title: "TOOLS",
         items: &[
-            ("r", "Refresh client"),
+            ("r", "Reload config"),
             (":", "Command prompt"),
             ("?", "All keybindings"),
-            ("Esc", "Dismiss help"),
+            ("C-s", "Save workspace"),
+            ("C-r", "Restore workspace"),
         ],
     },
 ];
@@ -64,6 +72,50 @@ fn heading(group: &Group, width: usize) -> String {
 }
 
 fn item((key, label): (&str, &str), width: usize) -> String {
+    let option = match key {
+        "g" => Some("@prefix-help-workspace-key"),
+        "C-s" => Some("@prefix-help-save-key"),
+        "C-r" => Some("@prefix-help-restore-key"),
+        _ => None,
+    };
+    static KEYS: std::sync::OnceLock<[String; 3]> = std::sync::OnceLock::new();
+    let keys = KEYS.get_or_init(|| {
+        [
+            "@prefix-help-workspace-key",
+            "@prefix-help-save-key",
+            "@prefix-help-restore-key",
+        ]
+        .map(|name| {
+            {
+                let mut command = std::process::Command::new("tmux");
+                if let Some(socket) = SOCKET.get() {
+                    command.arg("-S").arg(socket);
+                }
+                command
+            }
+            .args(["show-option", "-gqv", name])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .unwrap_or_default()
+        })
+    });
+    let configured = match key {
+        "g" => Some(keys[0].as_str()),
+        "C-s" => Some(keys[1].as_str()),
+        "C-r" => Some(keys[2].as_str()),
+        _ => None,
+    };
+    let key = if option.is_some() {
+        match configured.map(str::trim) {
+            Some("") | None => return " ".repeat(width),
+            Some(value) if value.is_ascii() => value,
+            Some(_) => return " ".repeat(width),
+        }
+    } else {
+        key
+    };
     let key_width = width.min(8);
     styled(&cell(key, key_width), CYAN, true) + &cell(label, width - key_width)
 }

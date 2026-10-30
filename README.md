@@ -105,3 +105,17 @@ cargo build --release --locked
 The Python tests use `target/debug/tmux-prefix-help`; set `PREFIX_HELP_BINARY`
 to test a different executable, including the release build. The live test
 creates and removes its own tmux socket, server, client PTY, and cache directory.
+
+### Optional workspace and recovery hints
+
+Set these after installing the corresponding bindings to include them in help:
+
+```tmux
+set -g @prefix-help-workspace-key g
+set -g @prefix-help-save-key C-s
+set -g @prefix-help-restore-key C-r
+```
+
+They default to empty (hidden). The popup reads the options from its own tmux
+socket on opening; changes apply to the next popup. Existing key forwarding is
+unchanged. The footer still documents Escape to dismiss.

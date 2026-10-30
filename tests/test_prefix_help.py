@@ -19,7 +19,7 @@ class PopupPTYTests(unittest.TestCase):
     def setUpClass(cls):
         require_binary()
 
-    def run_popup(self, chunks, session="$1", queued=b""):
+    def run_popup(self, chunks, session="$1", queued=b"", hints=None):
         with tempfile.TemporaryDirectory(prefix="prefix-popup-test-") as directory:
             root = Path(directory)
             log = root / "calls.jsonl"
@@ -30,10 +30,11 @@ class PopupPTYTests(unittest.TestCase):
                 "with open(os.environ['MOCK_LOG'], 'a') as log:\n"
                 "    log.write(json.dumps({'args': sys.argv[1:], 'own_session': os.getsid(0) == os.getpid()}) + '\\n')\n"
                 "if 'display-message' in sys.argv: print(os.environ['MOCK_SESSION'])\n"
+                "if 'show-option' in sys.argv: print(json.loads(os.environ.get('MOCK_HINTS', '{}')).get(sys.argv[-1], ''))\n"
             )
             mock.chmod(0o755)
             env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"],
-                       MOCK_LOG=str(log), MOCK_SESSION=session, PYTHONDONTWRITEBYTECODE="1")
+                       MOCK_HINTS=json.dumps(hints or {}), MOCK_LOG=str(log), MOCK_SESSION=session, PYTHONDONTWRITEBYTECODE="1")
             master, slave = pty.openpty()
             termios.tcsetwinsize(slave, (14, 68))
             previous = termios.tcgetattr(slave)
@@ -71,6 +72,7 @@ class PopupPTYTests(unittest.TestCase):
                     process.communicate()
                 os.close(master)
                 os.close(slave)
+            self.rendered = rendered
             return [json.loads(line) for line in log.read_text().splitlines()]
 
     def test_unlisted_shortcut_and_queued_typing(self):
@@ -125,7 +127,18 @@ class PopupPTYTests(unittest.TestCase):
 
     def test_session_change_does_not_replay_input(self):
         calls = self.run_popup([b"x"], session="$2")
-        self.assertEqual(len(calls), 1)
+        actions = [call for call in calls if "show-option" not in call["args"]]
+        self.assertEqual(len(actions), 1)
+
+    def test_optional_workspace_hints(self):
+        self.run_popup([b"x"], hints={"@prefix-help-workspace-key": "g", "@prefix-help-save-key": "C-s", "@prefix-help-restore-key": "C-r"})
+        for label in (b"Project workspace", b"Save workspace", b"Restore workspace"):
+            self.assertIn(label, self.rendered)
+
+    def test_optional_hints_hidden_by_default(self):
+        self.run_popup([b"x"])
+        self.assertNotIn(b"Save workspace", self.rendered)
+        self.assertNotIn(b"Project workspace", self.rendered)
 
     def test_startup_preserves_queued_input(self):
         command = self.run_popup([], queued=b"1")[-1]["args"]

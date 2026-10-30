@@ -19,6 +19,7 @@ fn run(args: &[OsString]) -> io::Result<()> {
         }
         [command, socket, client, session] if command == "popup" => {
             let tmux = tmux::Tmux::at(socket);
+            layout::set_socket(socket);
             let outcome = terminal::read_popup()?;
             // The client may have switched sessions while the popup was open.
             if !tmux.in_session(client, session) {
